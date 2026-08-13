@@ -47,15 +47,16 @@ impl Database {
     /// Open or create an index database at the given path.
     /// The identity is stored in the meta table and checked on subsequent opens.
     pub fn open(path: &Path, identity: &IndexIdentity) -> Result<Self, DbError> {
+        // Register sqlite-vec BEFORE opening the connection so vec0 is
+        // available on this and all future connections.
+        ensure_vec_registered();
+
         let conn = Connection::open(path)?;
 
         // Enable WAL mode
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "busy_timeout", 5000)?;
-
-        // Load sqlite-vec extension
-        load_sqlite_vec(&conn)?;
 
         // Run schema migrations
         Self::migrate(&conn)?;
@@ -84,12 +85,12 @@ impl Database {
 
     /// Read-only open for queries (still WAL, no writes).
     pub fn open_readonly(path: &Path) -> Result<(Self, IndexIdentity), DbError> {
+        ensure_vec_registered();
+
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "query_only", true)?;
         conn.pragma_update(None, "busy_timeout", 5000)?;
-
-        load_sqlite_vec(&conn)?;
 
         let identity = Self::read_identity(&conn)?
             .ok_or(DbError::MissingMeta("identity".into()))?;
@@ -393,32 +394,21 @@ fn embedding_to_bytes(embedding: &[f32]) -> Vec<u8> {
     bytes
 }
 
-/// Load the sqlite-vec extension into a connection.
-/// Uses sqlite3_auto_extension so it's loaded on every new connection.
-fn load_sqlite_vec(conn: &Connection) -> Result<(), DbError> {
-    // The auto_extension + transmute approach is unreliable across builds.
-    // Use the per-connection load approach instead.
-    unsafe {
-        let mut msg_ptr: *mut std::os::raw::c_char = std::ptr::null_mut();
-        let rc = rusqlite::ffi::sqlite3_load_extension(
-            conn.handle(),
-            b"sqlite_vec\0".as_ptr() as *const _,
-            std::ptr::null(),
-            &mut msg_ptr,
-        );
-        if rc != rusqlite::ffi::SQLITE_OK {
-            // Fallback: try the auto-extension mechanism
-            use std::sync::Once;
-            static INIT: Once = Once::new();
-            INIT.call_once(|| {
-                rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
-                    sqlite_vec::sqlite3_vec_init as *const (),
-                )));
-            });
+/// Register sqlite-vec's vec0 module globally via sqlite3_auto_extension.
+/// This must be called BEFORE any Connection::open() so that every new
+/// connection automatically has the vec0 module available. We use a Once
+/// guard so the registration happens exactly once per process.
+static VEC_INIT: std::sync::Once = std::sync::Once::new();
+
+fn ensure_vec_registered() {
+    VEC_INIT.call_once(|| {
+        unsafe {
+            rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
+                sqlite_vec::sqlite3_vec_init as *const (),
+            )));
         }
-    }
-    tracing::debug!("sqlite-vec extension registered");
-    Ok(())
+        tracing::debug!("sqlite-vec auto-extension registered");
+    });
 }
 
 #[cfg(test)]
