@@ -132,8 +132,36 @@ async fn main() -> anyhow::Result<()> {
                             }
                             println!("💾 Index file:       {}", current.display());
                         }
-                        Err(e) => {
-                            println!("⚠️  Failed to open index: {}", e);
+                        Err(_) => {
+                            // New-format hold (index_meta header, §3):
+                            // report from the checked header directly.
+                            match fleet_memory::query::verify_index_header(&current, None) {
+                                Ok(id) => {
+                                    let conn = rusqlite::Connection::open(&current).ok();
+                                    let (docs, chunks, chunker) = conn
+                                        .and_then(|c| {
+                                            let d: i64 = c
+                                                .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
+                                                .unwrap_or(0);
+                                            let k: i64 = c
+                                                .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
+                                                .unwrap_or(0);
+                                            let v: String = c
+                                                .query_row("SELECT chunker_version FROM index_meta WHERE id = 1", [], |r| r.get(0))
+                                                .unwrap_or_else(|_| "?".into());
+                                            Some((d, k, v))
+                                        })
+                                        .unwrap_or((0, 0, "?".to_string()));
+                                    println!("🆔 Provider:         {}", id.provider);
+                                    println!("   Model:            {}", id.model);
+                                    println!("   Dimensions:       {}", id.dims);
+                                    println!("📊 Documents:        {}", docs);
+                                    println!("   Chunks:           {}", chunks);
+                                    println!("🔧 Chunker:          {}", chunker);
+                                    println!("💾 Index file:       {}", current.display());
+                                }
+                                Err(e) => println!("⚠️  Failed to open index: {e}"),
+                            }
                         }
                     }
                 }
@@ -182,7 +210,224 @@ async fn main() -> anyhow::Result<()> {
             manager.swap_current(&path)?;
             println!("✅ Switched current → {}", path.display());
         }
+
+        Commands::Reindex {
+            root,
+            force,
+            include,
+            trigger,
+        } => {
+            let identity = IndexIdentity {
+                provider: cli.provider.clone(),
+                model: cli.model.clone(),
+                dims: cli.dims,
+            };
+
+            let embedder = EmbeddingClient::new(&cli.gateway, &cli.model, cli.dims)?;
+            let include_re = match include {
+                Some(ref pattern) => Some(Regex::new(pattern)?),
+                None => None,
+            };
+
+            let embed = move |texts: Vec<String>| -> fleet_memory::reindex::EmbedFuture {
+                let client = embedder.clone();
+                Box::pin(async move {
+                    client
+                        .embed_batch(&texts)
+                        .await
+                        .map_err(|e| e.to_string())
+                })
+            };
+
+            let opts = fleet_memory::reindex::PipelineOpts {
+                root: &root,
+                index_dir: &manager.index_dir,
+                identity: &identity,
+                chunk_chars: cli.chunk_size,
+                include: include_re,
+                force,
+                trigger: &trigger,
+            };
+
+            let out = fleet_memory::reindex::run_pipeline(opts, &embed).await?;
+
+            println!("\n✅ Pipeline run {} complete", out.run_id);
+            println!("   Docs in snapshot:  {}", out.docs_total);
+            println!("   Docs processed:    {}", out.docs_done);
+            println!("   Chunks written:   {}", out.chunks_written);
+            println!("   Batches:           {}", out.batches);
+            println!("   Deferred mid-run:  {} (next run picks them up)", out.skipped_midrun + out.invalidated_midrun);
+            println!("   Peak RSS:          {}", out
+                .peak_rss_bytes
+                .map(|b| format!("{b} bytes (recorded in checkpoint — the O(batch) proof)"))
+                .unwrap_or_else(|| "n/a".into()));
+            let current = manager.resolve_current()?;
+            println!("   Current →          {}", current.display());
+        }
+
+        Commands::Find { phrase, k } => {
+            let registry_path = cli
+                .registry
+                .clone()
+                .unwrap_or_else(|| manager.index_dir.join("fleet-memory.db"));
+
+            let mut report = fleet_memory::query::FindReport {
+                tagged: Vec::new(),
+                fts: Vec::new(),
+                semantic: Vec::new(),
+                semantic_skipped: None,
+            };
+
+            let reg = if registry_path.exists() {
+                match fleet_memory::reindex::Registry::open(&registry_path) {
+                    Ok(r) => Some(r),
+                    Err(e) => {
+                        report.semantic_skipped =
+                            Some(format!("registry unreadable ({e})"));
+                        None
+                    }
+                }
+            } else {
+                report.semantic_skipped =
+                    Some(format!("no registry at {}", registry_path.display()));
+                None
+            };
+
+            if let Some(r) = &reg {
+                match fleet_memory::query::find_tagged(r.conn(), &phrase) {
+                    Ok(hits) => report.tagged = hits,
+                    Err(e) => tracing::warn!("tagged lane failed: {e}"),
+                }
+                match fleet_memory::query::find_fts(r.conn(), &phrase) {
+                    Ok(hits) => report.fts = hits,
+                    Err(e) => tracing::warn!("full-text lane failed: {e}"),
+                }
+            }
+
+            // Semantic lane: current index only, same provider, no fallback.
+            match manager.resolve_current() {
+                Ok(current) => {
+                    match fleet_memory::query::verify_index_header(
+                        &current,
+                        reg.as_ref().map(|r| r.conn()),
+                    ) {
+                        Ok(identity) => {
+                            let embedder =
+                                EmbeddingClient::new(&cli.gateway, &identity.model, identity.dims)?;
+                            match embedder.embed_one(&phrase).await {
+                                Ok(qv) => {
+                                    report.semantic =
+                                        fleet_memory::query::find_semantic(&current, &qv, k)?;
+                                }
+                                Err(e) => {
+                                    report.semantic_skipped =
+                                        Some(format!("embedding unavailable ({e}) — lanes above are still valid"));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            report.semantic_skipped = Some(e.to_string());
+                        }
+                    }
+                }
+                Err(_) => {
+                    if report.semantic_skipped.is_none() {
+                        report.semantic_skipped =
+                            Some("no current index — run `reindex` first".into());
+                    }
+                }
+            }
+
+            println!("find {:?}", phrase);
+            println!("── tagged lane (work_subjects) ──");
+            if report.tagged.is_empty() {
+                println!("  (none)");
+            }
+            for h in &report.tagged {
+                println!("  [{:.2}] {} — {} ({})", h.weight, h.slug, h.title, h.kind);
+            }
+            println!("── full-text lane (work_text_fts) ──");
+            if report.fts.is_empty() {
+                println!("  (none)");
+            }
+            for h in &report.fts {
+                println!("  {} — {}", h.slug, h.snippet);
+            }
+            println!("── semantic lane (current index KNN) ──");
+            if let Some(reason) = &report.semantic_skipped {
+                println!("  skipped: {reason}");
+            }
+            if report.semantic.is_empty() {
+                println!("  (none)");
+            }
+            for h in &report.semantic {
+                println!("  [d={:.4}] {} — {}", h.distance, h.path, excerpt(&h.text, 120));
+            }
+        }
+
+        Commands::Renders { slug } => {
+            let registry_path = cli
+                .registry
+                .clone()
+                .unwrap_or_else(|| manager.index_dir.join("fleet-memory.db"));
+            if !registry_path.exists() {
+                println!("No registry at {} — nothing rendered yet.", registry_path.display());
+                return Ok(());
+            }
+            let reg = fleet_memory::reindex::Registry::open(&registry_path)?;
+            let rows = fleet_memory::query::renders(reg.conn(), &slug)?;
+            if rows.is_empty() {
+                println!("No renders found for {:?}.", slug);
+            } else {
+                println!("renders for {:?}:", slug);
+                for r in &rows {
+                    println!(
+                        "  {:<10} v{}  {:<5} {}  {}{}",
+                        r.render_kind,
+                        r.seq,
+                        r.location_kind,
+                        r.location,
+                        r.renderer.as_deref().unwrap_or("-"),
+                        r.duration_ms
+                            .map(|d| format!("  ({} ms)", d))
+                            .unwrap_or_default()
+                    );
+                }
+            }
+        }
+
+        Commands::Decided { date } => {
+            let registry_path = cli
+                .registry
+                .clone()
+                .unwrap_or_else(|| manager.index_dir.join("fleet-memory.db"));
+            if !registry_path.exists() {
+                println!("No registry at {} — no decisions logged yet.", registry_path.display());
+                return Ok(());
+            }
+            let reg = fleet_memory::reindex::Registry::open(&registry_path)?;
+            let rows = fleet_memory::query::decided(reg.conn(), &date)?;
+            if rows.is_empty() {
+                println!("No decisions on {}.", date);
+            } else {
+                println!("decided on {}:", date);
+                for d in &rows {
+                    println!("  {}  [{}/{}] {} ({})", d.decided_at, d.agent, d.domain, d.summary, d.status);
+                }
+            }
+        }
     }
 
     Ok(())
+}
+
+/// First line / bounded excerpt of a chunk for terminal display.
+fn excerpt(text: &str, max: usize) -> String {
+    let collapsed: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= max {
+        collapsed
+    } else {
+        let cut: String = collapsed.chars().take(max).collect();
+        format!("{cut}…")
+    }
 }

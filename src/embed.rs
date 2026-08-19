@@ -37,6 +37,7 @@ struct EmbeddingData {
 }
 
 /// Client for the fleet-gateway embedding endpoint.
+#[derive(Clone)]
 pub struct EmbeddingClient {
     client: Client,
     endpoint: String,

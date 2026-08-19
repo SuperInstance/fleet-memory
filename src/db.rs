@@ -386,7 +386,7 @@ impl Database {
 }
 
 /// Convert a float32 slice to little-endian bytes for sqlite-vec.
-fn embedding_to_bytes(embedding: &[f32]) -> Vec<u8> {
+pub(crate) fn embedding_to_bytes(embedding: &[f32]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(embedding.len() * 4);
     for &v in embedding {
         bytes.extend_from_slice(&v.to_le_bytes());
@@ -400,7 +400,7 @@ fn embedding_to_bytes(embedding: &[f32]) -> Vec<u8> {
 /// guard so the registration happens exactly once per process.
 static VEC_INIT: std::sync::Once = std::sync::Once::new();
 
-fn ensure_vec_registered() {
+pub(crate) fn ensure_vec_registered() {
     VEC_INIT.call_once(|| {
         unsafe {
             rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(

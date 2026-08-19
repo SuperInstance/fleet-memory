@@ -37,6 +37,10 @@ pub struct Cli {
     /// Maximum chunk size in characters
     #[arg(long, global = true, default_value = "2000")]
     pub chunk_size: usize,
+
+    /// Registry database path (defaults to <index_dir>/fleet-memory.db)
+    #[arg(long, global = true)]
+    pub registry: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -82,5 +86,48 @@ pub enum Commands {
         /// Index file to point 'current' at
         #[arg(long)]
         target: String,
+    },
+
+    /// Phase 4 streaming pipeline: snapshot manifest → bounded channel →
+    /// embedder (batches of 32) → one transaction per batch, with
+    /// checkpoint/resume and the registry cutover
+    Reindex {
+        /// Root directory to scan for text files
+        #[arg(long)]
+        root: PathBuf,
+
+        /// Force a fresh run (ignore any crashed run's checkpoint)
+        #[arg(long)]
+        force: bool,
+
+        /// File patterns to include (regex), e.g. "\.md$|\.txt$|\.rs$"
+        #[arg(long)]
+        include: Option<String>,
+
+        /// Trigger kind recorded in reindex_runs
+        #[arg(long, default_value = "manual")]
+        trigger: String,
+    },
+
+    /// Q1: find pieces about a phrase (tagged + full-text + semantic lanes)
+    Find {
+        /// The phrase to look for
+        phrase: String,
+
+        /// K for the semantic lane's KNN query
+        #[arg(long, default_value = "20")]
+        k: usize,
+    },
+
+    /// Q2: show all renders for a work, by slug
+    Renders {
+        /// Work slug, e.g. 'pfd-speech'
+        slug: String,
+    },
+
+    /// Q3: what was decided on a given date (YYYY-MM-DD)
+    Decided {
+        /// UTC day, e.g. 2026-08-13
+        date: String,
     },
 }
