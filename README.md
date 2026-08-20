@@ -4,6 +4,11 @@
 
 > *The fleet reads code by lines and remembers it by meaning. This is how it remembers.*
 
+<p align="center">
+  <img src="assets/hero_001.jpg" width="700" alt="Fleet Memory — one drawer of a vast midnight catalog, found glowing: how the fleet remembers by meaning">
+</p>
+
+
 ---
 
 ## Table of Contents
