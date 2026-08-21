@@ -451,7 +451,7 @@ fleet-memory search --query "error handling pattern" --gateway http://127.0.0.1:
 |---|---|
 | **[fleet-gateway](https://github.com/SuperInstance/fleet-gateway)** | Provides the embeddings API endpoint. Fleet Memory is the gateway's biggest customer for `/v1/embeddings`. |
 | **[fleet-jepa-midi](https://github.com/SuperInstance/fleet-jepa-midi)** | Uses Fleet Memory to store and retrieve MIDI corpus embeddings for JEPA training |
-| **[fleet-wiki](https://github.com/SuperInstance/fleet-wiki)** | Complementary: wiki uses Cloudflare Vectorize for cloud search; fleet-memory is the local equivalent |
+| **[lucineer-fleet-wiki](https://github.com/SuperInstance/lucineer-fleet-wiki)** | Complementary: wiki uses Cloudflare Vectorize for cloud search; fleet-memory is the local equivalent |
 | **[OpenClaw](https://github.com/SuperInstance/openclaw)** | Uses fleet-memory's index for memory recall in agent sessions |
 
 ---
