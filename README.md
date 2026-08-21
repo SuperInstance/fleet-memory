@@ -445,6 +445,17 @@ fleet-memory search --query "error handling pattern" --gateway http://127.0.0.1:
 
 ---
 
+## ✦ Gallery
+
+The index as the fleet sees it — one drawer of the midnight catalog, found glowing.
+
+<p align="center">
+  <img src="assets/images/fleet-memory-hero.jpg" width="700" alt="Fleet Memory — a single drawer of the vast midnight catalog, pulled open and glowing warm amber against the dark: how the fleet remembers by meaning"><br>
+  <em>The drawer that holds the meaning — every passage filed by what it means, not what it says.</em>
+</p>
+
+---
+
 ## Relation to the Fleet
 
 | Component | Relationship |
